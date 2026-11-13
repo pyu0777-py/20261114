@@ -7,12 +7,9 @@
   },
   "scripts": {
     "dev": "astro dev",
-    "prebuild": "npm run responsive:generate && npm run responsive:check",
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",
-    "responsive:generate": "node scripts/responsive-cache.mjs --generate-only",
-    "responsive:check": "node scripts/responsive-cache.mjs --check-only",
     "optimize:public": "node scripts/optimize-public-assets.mjs"
   },
   "dependencies": {
