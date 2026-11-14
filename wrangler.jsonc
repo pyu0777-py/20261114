@@ -1,7 +1,7 @@
 {
-  "name": "quanxin777",
-  "compatibility_date": "2026-11-12",
+  "name": "20261114",
+  "compatibility_date": "2026-11-13",
   "assets": {
-    "directory": "./dist"
+    "directory": "./public"
   }
 }
