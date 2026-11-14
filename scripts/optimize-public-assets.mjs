@@ -3,11 +3,12 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import sharp from 'sharp';
+import ffmpegStatic from 'ffmpeg-static';
 
 const execFileAsync = promisify(execFile);
 const projectRoot = process.cwd();
 const publicRoot = path.join(projectRoot, 'public');
-const ffmpegPath = path.join(projectRoot, 'node_modules', 'ffmpeg-static', 'ffmpeg.exe');
+const ffmpegPath = ffmpegStatic;
 
 const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 const videoExtensions = new Set(['.mp4', '.mov', '.m4v', '.webm']);
