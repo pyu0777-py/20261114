@@ -150,9 +150,13 @@ async function optimizeVideo(filePath) {
 }
 
 async function main() {
-  const ffmpegExists = await fs.access(ffmpegPath).then(() => true).catch(() => false);
+  let ffmpegExists = false;
+  if (ffmpegPath) {
+    ffmpegExists = await fs.access(ffmpegPath).then(() => true).catch(() => false);
+  }
+
   if (!ffmpegExists) {
-    throw new Error(`ffmpeg not found at ${ffmpegPath}`);
+    console.warn(`Warning: ffmpeg not found at ${ffmpegPath}, video optimization will be skipped.`);
   }
 
   const files = await walkFiles(publicRoot);
@@ -168,12 +172,17 @@ async function main() {
     totalBefore += beforeStat.size;
 
     let result;
+
     if (imageExtensions.has(ext)) {
       result = await optimizeImage(filePath);
       imageCount += 1;
     } else if (videoExtensions.has(ext)) {
-      result = await optimizeVideo(filePath);
-      videoCount += 1;
+      if (ffmpegExists) {
+        result = await optimizeVideo(filePath);
+        videoCount += 1;
+      } else {
+        result = { changed: false, before: beforeStat.size, after: beforeStat.size };
+      }
     }
 
     totalAfter += result ? result.after : beforeStat.size;
