@@ -55,7 +55,8 @@ const imageSizes = {
 };
 
 function toPublicUrl(absolutePath: string) {
-    return encodeURI('/' + path.relative(publicRoot, absolutePath).split(path.sep).join('/'));
+    const relativePath = path.relative(publicRoot, absolutePath).split(path.sep).join('/');
+    return '/' + relativePath.split('/').map((segment) => encodeURIComponent(segment)).join('/');
 }
 
 function isRemoteImageUrl(src: string) {
@@ -68,11 +69,19 @@ function isLocalPublicImageUrl(src: string) {
 
 function normalizePublicUrl(src: string) {
     if (!src.startsWith('/')) return src;
-    return encodeURI(decodeURI(src));
+    const normalizedPath = src.replace(/\\/g, '/');
+    const segments = normalizedPath.split('/').filter(Boolean).map((segment) => encodeURIComponent(decodeURIComponent(segment)));
+    return '/' + segments.join('/');
 }
 
 function getAbsolutePathFromPublicUrl(src: string) {
-    return path.join(publicRoot, decodeURI(src.replace(/^\//, '')));
+    const relativePath = src
+        .replace(/^\//, '')
+        .replace(/\\/g, '/')
+        .split('/')
+        .map((segment) => decodeURIComponent(segment))
+        .join(path.sep);
+    return path.join(publicRoot, relativePath);
 }
 
 function getPublicUrlExtension(src: string) {
@@ -93,10 +102,12 @@ async function fileExists(targetPath: string) {
 }
 
 function getResponsiveVariantUrl(src: string, width: number, extension: string) {
-    const relativePath = decodeURI(src.replace(/^\//, ''));
+    const relativePath = src.replace(/^\//, '').replace(/\\/g, '/').split('/').map((segment) => decodeURIComponent(segment)).join('/');
     const parsed = path.parse(relativePath);
-    const variantRelativePath = path.join('__responsive', parsed.dir, `${parsed.name}-w${width}${extension}`);
-    return encodeURI('/' + variantRelativePath.split(path.sep).join('/'));
+    const dir = (parsed.dir || '').replace(/\\/g, '/');
+    const variantParts = ['__responsive', dir, `${parsed.name}-w${width}${extension}`].filter(Boolean);
+    const variantRelativePath = variantParts.join('/');
+    return '/' + variantRelativePath.split('/').map((segment) => encodeURIComponent(segment)).join('/');
 }
 
 function getSharpFormat(extension: string) {
@@ -147,9 +158,11 @@ async function createLocalResponsiveImageData(src: string): Promise<ResponsiveIm
     const variantDir = path.join(responsiveOutputRoot, path.relative(publicRoot, parsed.dir));
     await fs.mkdir(variantDir, { recursive: true });
 
-    const generatedEntries = await Promise.all(
-        candidateWidths.map(async (width) => {
-            const outputPath = path.join(variantDir, `${parsed.name}-w${width}${extension}`);
+    const generatedEntries: string[] = [];
+
+    for (const width of candidateWidths) {
+        const outputPath = path.join(variantDir, `${parsed.name}-w${width}${extension}`);
+        try {
             if (!(await fileExists(outputPath))) {
                 let pipeline = sharp(absolutePath).rotate().resize({ width, withoutEnlargement: true });
                 if (sharpFormat === 'jpeg') pipeline = pipeline.jpeg({ quality: 82, mozjpeg: true });
@@ -159,9 +172,19 @@ async function createLocalResponsiveImageData(src: string): Promise<ResponsiveIm
                 await pipeline.toFile(outputPath);
             }
 
-            return `${getResponsiveVariantUrl(normalizedSrc, width, extension)} ${width}w`;
-        })
-    );
+            generatedEntries.push(`${getResponsiveVariantUrl(normalizedSrc, width, extension)} ${width}w`);
+        } catch (error) {
+            console.warn(`[responsive] skip variant for ${normalizedSrc} at ${width}w`, error);
+        }
+    }
+
+    if (!generatedEntries.length) {
+        return {
+            src: normalizedSrc,
+            width: metadata.width,
+            height: metadata.height,
+        };
+    }
 
     const srcsetEntries = [...generatedEntries, `${normalizedSrc} ${metadata.width}w`];
 
@@ -227,19 +250,24 @@ async function getResponsiveImageData(src: string): Promise<ResponsiveImageData>
         responsiveImageCache.set(
             src,
             (async () => {
-                if (isLocalPublicImageUrl(src)) {
-                    return createLocalResponsiveImageData(src);
-                }
+                try {
+                    if (isLocalPublicImageUrl(src)) {
+                        return await createLocalResponsiveImageData(src);
+                    }
 
-                if (/^https?:\/\/images\.unsplash\.com\//i.test(src)) {
-                    return buildUnsplashResponsiveData(src);
-                }
+                    if (/^https?:\/\/images\.unsplash\.com\//i.test(src)) {
+                        return buildUnsplashResponsiveData(src);
+                    }
 
-                if (/^https?:\/\/placehold\.co\//i.test(src)) {
-                    return buildPlaceholdResponsiveData(src);
-                }
+                    if (/^https?:\/\/placehold\.co\//i.test(src)) {
+                        return buildPlaceholdResponsiveData(src);
+                    }
 
-                return { src };
+                    return { src };
+                } catch (error) {
+                    console.warn(`[responsive] fallback to original source for ${src}`, error);
+                    return { src: normalizePublicUrl(src) };
+                }
             })()
         );
     }
@@ -327,13 +355,21 @@ async function loadProjectCards(rootPath: string): Promise<MainProjectCard[]> {
 
             if (!coverSrc) return null;
 
+            let latestFileMtime = (await fs.stat(folderPath)).mtimeMs;
+            for (const fileName of fileNames) {
+                const fileStat = await fs.stat(path.join(folderPath, fileName));
+                if (fileStat.mtimeMs > latestFileMtime) {
+                    latestFileMtime = fileStat.mtimeMs;
+                }
+            }
+
             const card: MainProjectCard = {
                 folderName,
                 coverSrc,
                 images,
                 videos,
                 imageCount: images.length,
-                sortTime: (await fs.stat(folderPath)).mtimeMs,
+                sortTime: latestFileMtime,
             };
 
             if (previewVideoSrc) {

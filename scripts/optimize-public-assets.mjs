@@ -49,6 +49,114 @@ function formatBytes(bytes) {
   return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
+function normalizeMediaName(name) {
+  const parsed = path.parse(name);
+  const rawBase = parsed.name || name;
+  const safeBase = rawBase
+    .normalize('NFKC')
+    .replace(/[&]/g, ' and ')
+    .replace(/[\u2018\u2019\u201B\u2032\u2035'"`]/g, '')
+    .replace(/[<>:"/\\|?*%#]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[.]+$/g, '')
+    .replace(/^[.]+/g, '')
+    .trim();
+
+  const base = safeBase || 'asset';
+  const ext = parsed.ext ? parsed.ext.replace(/[<>:"/\\|?*%#]+/g, '') : '';
+  const finalName = `${base}${ext}`.trim();
+  return finalName || 'asset';
+}
+
+async function renameWithRetry(oldPath, newPath) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await fs.rename(oldPath, newPath);
+      return true;
+    } catch (error) {
+      if (error && (error.code === 'EBUSY' || error.code === 'EPERM')) {
+        await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+        continue;
+      }
+      throw error;
+    }
+  }
+  return false;
+}
+
+async function ensureUniquePath(targetPath, originalPath) {
+  if (targetPath === originalPath) return targetPath;
+  let candidate = targetPath;
+  let counter = 1;
+
+  while (true) {
+    try {
+      await fs.access(candidate);
+      const parsed = path.parse(targetPath);
+      candidate = path.join(parsed.dir, `${parsed.name}-${counter}${parsed.ext}`);
+      counter += 1;
+      if (counter > 500) {
+        throw new Error(`Could not generate a unique name for ${targetPath}`);
+      }
+    } catch {
+      return candidate;
+    }
+  }
+}
+
+async function sanitizeMediaTree(rootPath) {
+  const renames = [];
+
+  async function walk(currentPath) {
+    const entries = await fs.readdir(currentPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = path.join(currentPath, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === '__responsive') continue;
+        await walk(fullPath);
+        const normalizedName = normalizeMediaName(entry.name);
+        if (normalizedName !== entry.name) {
+          renames.push({
+            from: fullPath,
+            to: path.join(currentPath, normalizedName),
+          });
+        }
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+      const normalizedName = normalizeMediaName(entry.name);
+      if (normalizedName !== entry.name) {
+        renames.push({
+          from: fullPath,
+          to: path.join(currentPath, normalizedName),
+        });
+      }
+    }
+  }
+
+  await walk(rootPath);
+
+  renames.sort((left, right) => right.from.length - left.from.length);
+
+  for (const rename of renames) {
+    const targetPath = await ensureUniquePath(rename.to, rename.from);
+    if (targetPath === rename.from) continue;
+
+    try {
+      const renamed = await renameWithRetry(rename.from, targetPath);
+      if (!renamed) {
+        console.warn(`Skipping locked asset rename: ${rename.from} -> ${targetPath}`);
+      }
+    } catch (error) {
+      console.warn(`Skipping asset rename because it could not be completed safely: ${rename.from} -> ${targetPath}`);
+      console.warn(error);
+    }
+  }
+}
+
 async function replaceOptimizedFile(filePath, tempPath) {
   for (let attempt = 0; attempt < 6; attempt += 1) {
     try {
@@ -175,6 +283,8 @@ async function optimizeVideo(filePath) {
 }
 
 async function main() {
+  await sanitizeMediaTree(publicRoot);
+
   let ffmpegExists = false;
   if (ffmpegPath) {
     ffmpegExists = await fs.access(ffmpegPath).then(() => true).catch(() => false);
