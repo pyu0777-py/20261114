@@ -8,6 +8,7 @@ import ffmpegStatic from 'ffmpeg-static';
 const execFileAsync = promisify(execFile);
 const projectRoot = process.cwd();
 const publicRoot = path.join(projectRoot, 'public');
+const distRoot = path.join(projectRoot, 'dist');
 const ffmpegPath = ffmpegStatic;
 
 const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -19,8 +20,6 @@ async function walkFiles(dir, output = []) {
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      const relative = path.relative(publicRoot, fullPath).split(path.sep).join('/');
-      if (relative === '__responsive' || relative.startsWith('__responsive/')) continue;
       await walkFiles(fullPath, output);
       continue;
     }
@@ -50,10 +49,28 @@ function formatBytes(bytes) {
   return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
+async function replaceOptimizedFile(filePath, tempPath) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await fs.rm(filePath, { force: true });
+      await fs.rename(tempPath, filePath);
+      return;
+    } catch (error) {
+      if (error && (error.code === 'EBUSY' || error.code === 'EPERM')) {
+        await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new Error(`File lock could not be released for ${filePath}`);
+}
+
 async function optimizeImage(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const stat = await fs.stat(filePath);
-  if (stat.size < 128 * 1024) return { changed: false, before: stat.size, after: stat.size };
+  if (stat.size < 10 * 1024 * 1024) return { changed: false, before: stat.size, after: stat.size };
 
   const metadata = await sharp(filePath).metadata();
   const maxDimension = metadata.width && metadata.height
@@ -95,10 +112,14 @@ async function optimizeImage(filePath) {
       return { changed: false, before: stat.size, after: stat.size };
     }
 
-    await fs.rm(filePath, { force: true });
-    await fs.rename(tempPath, filePath);
-
-    return { changed: true, before: stat.size, after: tempStat.size };
+    try {
+      await replaceOptimizedFile(filePath, tempPath);
+      return { changed: true, before: stat.size, after: tempStat.size };
+    } catch (error) {
+      console.warn(`Skipping locked file during optimization: ${filePath}`);
+      await fs.rm(tempPath, { force: true });
+      return { changed: false, before: stat.size, after: stat.size };
+    }
   } catch (error) {
     try {
       await fs.rm(tempPath, { force: true });
@@ -109,7 +130,7 @@ async function optimizeImage(filePath) {
 
 async function optimizeVideo(filePath) {
   const stat = await fs.stat(filePath);
-  if (stat.size < 2 * 1024 * 1024) {
+  if (stat.size < 40 * 1024 * 1024) {
     return { changed: false, before: stat.size, after: stat.size };
   }
 
@@ -137,10 +158,14 @@ async function optimizeVideo(filePath) {
       return { changed: false, before: stat.size, after: stat.size };
     }
 
-    await fs.rm(filePath, { force: true });
-    await fs.rename(tempPath, filePath);
-
-    return { changed: true, before: stat.size, after: tempStat.size };
+    try {
+      await replaceOptimizedFile(filePath, tempPath);
+      return { changed: true, before: stat.size, after: tempStat.size };
+    } catch (error) {
+      console.warn(`Skipping locked file during video optimization: ${filePath}`);
+      await fs.rm(tempPath, { force: true });
+      return { changed: false, before: stat.size, after: stat.size };
+    }
   } catch (error) {
     try {
       await fs.rm(tempPath, { force: true });
@@ -159,34 +184,43 @@ async function main() {
     console.warn(`Warning: ffmpeg not found at ${ffmpegPath}, video optimization will be skipped.`);
   }
 
-  const files = await walkFiles(publicRoot);
+  const roots = [publicRoot];
+  const distExists = await fs.access(distRoot).then(() => true).catch(() => false);
+  if (distExists) {
+    roots.push(distRoot);
+  }
+
   let imageCount = 0;
   let videoCount = 0;
   let totalBefore = 0;
   let totalAfter = 0;
   let totalSaved = 0;
 
-  for (const filePath of files) {
-    const ext = path.extname(filePath).toLowerCase();
-    const beforeStat = await fs.stat(filePath);
-    totalBefore += beforeStat.size;
+  for (const root of roots) {
+    const files = await walkFiles(root);
 
-    let result;
+    for (const filePath of files) {
+      const ext = path.extname(filePath).toLowerCase();
+      const beforeStat = await fs.stat(filePath);
+      totalBefore += beforeStat.size;
 
-    if (imageExtensions.has(ext)) {
-      result = await optimizeImage(filePath);
-      imageCount += 1;
-    } else if (videoExtensions.has(ext)) {
-      if (ffmpegExists) {
-        result = await optimizeVideo(filePath);
-        videoCount += 1;
-      } else {
-        result = { changed: false, before: beforeStat.size, after: beforeStat.size };
+      let result;
+
+      if (imageExtensions.has(ext)) {
+        result = await optimizeImage(filePath);
+        imageCount += 1;
+      } else if (videoExtensions.has(ext)) {
+        if (ffmpegExists) {
+          result = await optimizeVideo(filePath);
+          videoCount += 1;
+        } else {
+          result = { changed: false, before: beforeStat.size, after: beforeStat.size };
+        }
       }
-    }
 
-    totalAfter += result ? result.after : beforeStat.size;
-    totalSaved += result && result.changed ? (result.before - result.after) : 0;
+      totalAfter += result ? result.after : beforeStat.size;
+      totalSaved += result && result.changed ? (result.before - result.after) : 0;
+    }
   }
 
   console.log(`images=${imageCount} videos=${videoCount}`);
